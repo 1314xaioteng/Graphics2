@@ -1,0 +1,14 @@
+{
+  "timestamp": "D:\\MyProject\\pythonProject\\Gra_code_test",
+  "models_count": 2,
+  "styles_rendered": 4,
+  "total_results": 4,
+  "output_directory": "D:\\MyProject\\pythonProject\\Gra_code_test\\demo_output",
+  "key_features": [
+    "Real-time style switching",
+    "Adjustable style strength",
+    "Geometric preservation",
+    "Edge detection",
+    "GPU acceleration"
+  ]
+}
