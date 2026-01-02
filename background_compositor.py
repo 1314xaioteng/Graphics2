@@ -37,22 +37,6 @@ def composite_with_background(foreground, depth_map, background):
     # 混合
     result = foreground * alpha + bg_resized * (1 - alpha)
 
-    # 打印调试信息
-    fg_pixels = np.sum(depth_map > 0.001)
-    alpha_1_pixels = np.sum(alpha > 0.99)
-    alpha_mean = alpha[alpha > 0].mean() if (alpha > 0).any() else 0
-    total_pixels = depth_map.size
-
-    # 额外诊断：检查depth_map的分布
-    depth_nonzero = depth_map[depth_map > 0]
-    if len(depth_nonzero) > 0:
-        print(f"    [Background] Depth (nonzero) range: [{depth_nonzero.min():.4f}, {depth_nonzero.max():.4f}]")
-
-    print(f"    [Background] Foreground pixels: {fg_pixels}/{total_pixels} ({100*fg_pixels/total_pixels:.1f}%)")
-    print(f"    [Background] Alpha=1.0 pixels: {alpha_1_pixels} ({100*alpha_1_pixels/total_pixels:.1f}%)")
-    print(f"    [Background] Alpha mean (fg): {alpha_mean:.4f}")
-    print(f"    [Background] Alpha range: [{alpha.min():.4f}, {alpha.max():.4f}]")
-
     return result.astype(np.uint8)
 
 

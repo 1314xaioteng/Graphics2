@@ -37,7 +37,8 @@ from background_compositor import composite_with_background
 @jit(nopython=True)
 def rasterize_triangles(vertices, faces, image_size):
     """使用Numba加速的光栅化核心函数"""
-    depth_map = np.zeros((image_size, image_size), dtype=np.float32)
+    # 初始化 depth_map 为极大值（表示无穷远）
+    depth_map = np.full((image_size, image_size), 1e10, dtype=np.float32)
     # 初始化法线图，默认指向Z轴
     normal_map = np.zeros((image_size, image_size, 3), dtype=np.float32)
 
@@ -101,9 +102,8 @@ def rasterize_triangles(vertices, faces, image_size):
                 if w0 >= 0 and w1 >= 0 and w2 >= 0:
                     z = w0 * v0[2] + w1 * v1[2] + w2 * v2[2]
 
-                    # 简化的深度测试：直接覆盖（无深度测试）
-                    # 或者如果当前为0（背景），总是写入
-                    if depth_map[y, x] == 0 or z > depth_map[y, x]:
+                    # 正确的深度测试：z 值越小越近，应该保留更小的 z
+                    if z < depth_map[y, x]:
                         depth_map[y, x] = z
                         normal_map[y, x, 0] = face_normals[i, 0]
                         normal_map[y, x, 1] = face_normals[i, 1]
@@ -198,19 +198,23 @@ class NPRRenderer:
         # 注意：第一次调用时会进行编译，可能需要1-2秒，之后会非常快
         depth_map, normal_map = rasterize_triangles(vertices, faces, image_size)
 
+        # 将背景（未渲染区域，值为1e10）设置为0
+        # 前景区域的 z 值应该远小于 1e10
+        mask = depth_map < 1e9  # 前景遮罩
+        depth_map[~mask] = 0  # 背景设为0
+
         # 诊断：渲染了多少像素
-        rendered_pixels = np.sum(depth_map > 0)
+        rendered_pixels = np.sum(mask)
         total_pixels = depth_map.size
         print(f"    Rasterization: {rendered_pixels}/{total_pixels} pixels ({100*rendered_pixels/total_pixels:.1f}%)")
 
         # 额外诊断：深度分布
         if rendered_pixels > 0:
-            depth_fg = depth_map[depth_map > 0]
+            depth_fg = depth_map[mask]
             print(f"    Raw depth range: [{depth_fg.min():.4f}, {depth_fg.max():.4f}]")
             print(f"    Raw depth mean: {depth_fg.mean():.4f}")
 
         # 归一化深度（仅对前景区域，保持背景为0）
-        mask = depth_map > 0  # 前景遮罩
         if mask.any() and depth_map.max() > depth_map.min():
             # 只归一化前景区域，映射到[0.1, 1.0]范围
             # 确保前景像素的最小值也 > 0，不会和背景混淆
@@ -532,22 +536,24 @@ class NPRRenderer:
 
         print(f"    {style.capitalize()} style applied (strength: {strength:.1%})")
 
-        # Step 5: 色彩迁移（在背景合成前应用，让模型有Van Gogh色彩）
+        # Step 5: 色彩迁移（在背景合成前应用）
         if color_reference is not None:
             print("\n  Step 5: Applying color transfer to foreground...")
+            # 对整个图像应用色彩迁移（背景区域会在后续合成时被替换）
             result = reinhard_color_transfer(result, color_reference)
             print("    Color transfer applied")
 
         # Step 6: 背景合成（最后合成背景）
         if background is not None:
             print("\n  Step 6: Compositing with background...")
-            # 翻转 depth_map 和 background 以匹配 result 的方向
-            depth_map_flipped = np.flipud(depth_map)
-            background_flipped = np.flipud(background)
-            result = composite_with_background(result, depth_map_flipped, background_flipped)
+            # 策略：所有图像都先翻转到正常方向，然后合成，避免方向混乱
+            result_normal = np.flipud(result)
+            depth_map_normal = np.flipud(depth_map)
+            # background 已经是正常方向
+            result_composited = composite_with_background(result_normal, depth_map_normal, background)
             print("    Background composited")
-            # 合成后不需要再翻转，直接返回
-            return result
+            # 返回正常方向的图像
+            return result_composited
 
         # 如果没有背景合成，则翻转 result 后返回
         result = np.flipud(result)
