@@ -29,6 +29,10 @@ from numba import jit
 # 导入项目模块
 sys.path.insert(0, os.path.dirname(__file__))
 
+# 导入色彩迁移和背景合成模块
+from color_transfer import reinhard_color_transfer
+from background_compositor import composite_with_background
+
 
 @jit(nopython=True)
 def rasterize_triangles(vertices, faces, image_size):
@@ -97,7 +101,9 @@ def rasterize_triangles(vertices, faces, image_size):
                 if w0 >= 0 and w1 >= 0 and w2 >= 0:
                     z = w0 * v0[2] + w1 * v1[2] + w2 * v2[2]
 
-                    if z > depth_map[y, x] or depth_map[y, x] == 0:
+                    # 简化的深度测试：直接覆盖（无深度测试）
+                    # 或者如果当前为0（背景），总是写入
+                    if depth_map[y, x] == 0 or z > depth_map[y, x]:
                         depth_map[y, x] = z
                         normal_map[y, x, 0] = face_normals[i, 0]
                         normal_map[y, x, 1] = face_normals[i, 1]
@@ -149,12 +155,14 @@ class NPRRenderer:
         vertices = np.array(vertices, dtype=np.float32)
         faces = np.array(faces, dtype=np.int32)
 
-        # 归一化顶点到[-1, 1]
+        # 归一化顶点到[-1, 1]（光栅化需要）
         center = vertices.mean(axis=0)
         vertices -= center
         scale = np.max(np.abs(vertices))
         if scale > 0:
             vertices /= scale
+            # 不做额外缩放，保持在[-1, 1]范围
+            # 如果需要调整大小,在渲染时通过相机矩阵控制
 
         return {
             'vertices': vertices,
@@ -167,20 +175,53 @@ class NPRRenderer:
             }
         }
 
-    def render_depth_normal(self, model: Dict, image_size: int = 512) -> Tuple[np.ndarray, np.ndarray]:
+    def render_depth_normal(self, model: Dict, image_size: int = 512, model_scale: float = 0.7) -> Tuple[np.ndarray, np.ndarray]:
         """
         渲染深度图和法线图 (使用 Numba 加速版)
+
+        Args:
+            model: 模型数据
+            image_size: 渲染尺寸
+            model_scale: 模型缩放比例 (0.7 = 70%大小，留出背景空间)
         """
-        vertices = model['vertices']
+        vertices = model['vertices'].copy()  # 复制以避免修改原始数据
         faces = model['faces']
+
+        # 应用缩放（在[-1,1]空间中缩小模型，留出背景）
+        vertices = vertices * model_scale
+
+        # Debug: 打印缩放后的顶点范围
+        print(f"    Model scale: {model_scale}")
+        print(f"    Vertex range after scaling: [{vertices.min():.3f}, {vertices.max():.3f}]")
 
         # 调用上面定义的 Numba 加速函数
         # 注意：第一次调用时会进行编译，可能需要1-2秒，之后会非常快
         depth_map, normal_map = rasterize_triangles(vertices, faces, image_size)
 
-        # 归一化深度
-        if depth_map.max() > depth_map.min():
-            depth_map = (depth_map - depth_map.min()) / (depth_map.max() - depth_map.min())
+        # 诊断：渲染了多少像素
+        rendered_pixels = np.sum(depth_map > 0)
+        total_pixels = depth_map.size
+        print(f"    Rasterization: {rendered_pixels}/{total_pixels} pixels ({100*rendered_pixels/total_pixels:.1f}%)")
+
+        # 额外诊断：深度分布
+        if rendered_pixels > 0:
+            depth_fg = depth_map[depth_map > 0]
+            print(f"    Raw depth range: [{depth_fg.min():.4f}, {depth_fg.max():.4f}]")
+            print(f"    Raw depth mean: {depth_fg.mean():.4f}")
+
+        # 归一化深度（仅对前景区域，保持背景为0）
+        mask = depth_map > 0  # 前景遮罩
+        if mask.any() and depth_map.max() > depth_map.min():
+            # 只归一化前景区域，映射到[0.1, 1.0]范围
+            # 确保前景像素的最小值也 > 0，不会和背景混淆
+            depth_range = depth_map[mask]
+            if depth_range.max() > depth_range.min():
+                depth_normalized = (depth_range - depth_range.min()) / (depth_range.max() - depth_range.min())
+                # 映射到[0.1, 1.0]
+                depth_normalized = depth_normalized * 0.9 + 0.1
+                depth_map[mask] = depth_normalized
+        # 确保所有值都在 [0, 1] 范围内
+        depth_map = np.clip(depth_map, 0, 1)
 
         # 归一化法线到[0, 1]
         normal_map = (normal_map + 1) / 2
@@ -432,7 +473,9 @@ class NPRRenderer:
         return final
 
     def render(self, model: Dict, style: str = 'sketch', strength: float = 0.9,
-               image_size: int = 512) -> np.ndarray:
+               image_size: int = 512,
+               color_reference: Optional[np.ndarray] = None,
+               background: Optional[np.ndarray] = None) -> np.ndarray:
         """
         完整NPR渲染流程
 
@@ -441,6 +484,8 @@ class NPRRenderer:
             style: 风格（sketch/watercolor/cartoon/oil）
             strength: 风格强度（0-1）
             image_size: 输出尺寸
+            color_reference: 色彩参考图（可选）
+            background: 背景图（可选）
 
         Returns:
             渲染结果
@@ -452,7 +497,8 @@ class NPRRenderer:
 
         # Step 1: 渲染深度和法线
         print("\n  Step 1: Rendering depth & normal maps...")
-        depth_map, normal_map = self.render_depth_normal(model, image_size)
+        # 临时测试：使用1.0的缩放（填满整个视口）
+        depth_map, normal_map = self.render_depth_normal(model, image_size, model_scale=1.0)
         self.depth_map = depth_map
         self.normal_map = normal_map
         print(f"    Depth map: {depth_map.shape}")
@@ -481,9 +527,29 @@ class NPRRenderer:
         elif style == 'oil':
             result = self.apply_oil_style(color_map, edge_map, depth_map, strength)
         else:
+            # 不应用任何风格，直接使用色彩图（用于测试）
             result = color_map
 
         print(f"    {style.capitalize()} style applied (strength: {strength:.1%})")
+
+        # Step 5: 色彩迁移（在背景合成前应用，让模型有Van Gogh色彩）
+        if color_reference is not None:
+            print("\n  Step 5: Applying color transfer to foreground...")
+            result = reinhard_color_transfer(result, color_reference)
+            print("    Color transfer applied")
+
+        # Step 6: 背景合成（最后合成背景）
+        if background is not None:
+            print("\n  Step 6: Compositing with background...")
+            # 翻转 depth_map 和 background 以匹配 result 的方向
+            depth_map_flipped = np.flipud(depth_map)
+            background_flipped = np.flipud(background)
+            result = composite_with_background(result, depth_map_flipped, background_flipped)
+            print("    Background composited")
+            # 合成后不需要再翻转，直接返回
+            return result
+
+        # 如果没有背景合成，则翻转 result 后返回
         result = np.flipud(result)
         return result
 

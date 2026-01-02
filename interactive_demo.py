@@ -15,7 +15,7 @@
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import numpy as np
 from PIL import Image, ImageTk
 import os
@@ -26,8 +26,12 @@ import copy
 # 尝试导入渲染核心
 try:
     from npr_renderer import NPRRenderer
-except ImportError:
-    print("错误: 找不到 npr_renderer.py。请确保此脚本与 npr_renderer.py 在同一目录下。")
+except ImportError as e:
+    print("错误: 无法导入 npr_renderer.py")
+    print(f"详细错误: {e}")
+    print("\n可能的原因:")
+    print("1. 缺少依赖包（cv2, numpy, numba等）")
+    print("2. 请运行: pip install opencv-python numpy numba pillow")
     sys.exit(1)
 
 
@@ -42,6 +46,10 @@ class NPRInteractiveApp:
         self.models = {}
         self.current_model_data = None  # 原始数据
         self.display_model_data = None  # 旋转后的数据
+
+        # 色彩迁移和背景合成
+        self.color_reference = None  # 色彩参考图
+        self.background_image = None  # 背景图
 
         # 交互状态
         self.rotation = [0.0, 0.0]  # [pitch, yaw]
@@ -98,6 +106,14 @@ class NPRInteractiveApp:
         # 渲染信息
         self.lbl_info = ttk.Label(control_frame, text="Ready", foreground="gray")
         self.lbl_info.pack(fill=tk.X, pady=(20, 0))
+
+        # 色彩迁移和背景合成按钮
+        ttk.Separator(control_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+        ttk.Label(control_frame, text="Advanced Features:").pack(anchor=tk.W)
+
+        ttk.Button(control_frame, text="Load Color Reference", command=self._load_color_reference).pack(fill=tk.X, pady=2)
+        ttk.Button(control_frame, text="Load Background", command=self._load_background).pack(fill=tk.X, pady=2)
+        ttk.Button(control_frame, text="Clear Color/BG", command=self._clear_extras).pack(fill=tk.X, pady=2)
 
         # 保存按钮
         ttk.Button(control_frame, text="Save Screenshot", command=self._save_image).pack(side=tk.BOTTOM, fill=tk.X)
@@ -168,6 +184,43 @@ class NPRInteractiveApp:
         """重置视角"""
         self.rotation = [0.0, 0.0]
         self._update_display_model()
+        self._trigger_full_render()
+
+    def _load_color_reference(self):
+        """加载色彩参考图"""
+        filepath = filedialog.askopenfilename(
+            title="选择色彩参考图",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp"), ("All files", "*.*")]
+        )
+        if filepath:
+            try:
+                img = Image.open(filepath).convert('RGB')
+                self.color_reference = np.array(img)
+                messagebox.showinfo("成功", f"已加载色彩参考图：{os.path.basename(filepath)}")
+                self._trigger_full_render()
+            except Exception as e:
+                messagebox.showerror("错误", f"加载失败：{str(e)}")
+
+    def _load_background(self):
+        """加载背景图"""
+        filepath = filedialog.askopenfilename(
+            title="选择背景图",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp"), ("All files", "*.*")]
+        )
+        if filepath:
+            try:
+                img = Image.open(filepath).convert('RGB')
+                self.background_image = np.array(img)
+                messagebox.showinfo("成功", f"已加载背景图：{os.path.basename(filepath)}")
+                self._trigger_full_render()
+            except Exception as e:
+                messagebox.showerror("错误", f"加载失败：{str(e)}")
+
+    def _clear_extras(self):
+        """清除色彩参考和背景"""
+        self.color_reference = None
+        self.background_image = None
+        messagebox.showinfo("已清除", "色彩参考和背景已清除")
         self._trigger_full_render()
 
     # --- 鼠标交互逻辑 ---
@@ -255,12 +308,14 @@ class NPRInteractiveApp:
         t0 = time.time()
 
         # 调用核心渲染器
-        # 注意：这里我们使用 copy 的模型数据（已旋转）
+        # 注意:这里我们使用 copy 的模型数据（已旋转）
         result_img = self.renderer.render(
             self.display_model_data,
             style=style,
             strength=strength,
-            image_size=size
+            image_size=size,
+            color_reference=self.color_reference,
+            background=self.background_image
         )
 
         # 更新界面
@@ -299,7 +354,9 @@ class NPRInteractiveApp:
             self.display_model_data,
             style=style,
             strength=self.var_strength.get(),
-            image_size=1024  # 保存更高清
+            image_size=1024,  # 保存更高清
+            color_reference=self.color_reference,
+            background=self.background_image
         )
 
         Image.fromarray(img_array).save(filename)
