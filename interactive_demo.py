@@ -53,6 +53,7 @@ class NPRInteractiveApp:
 
         # 交互状态
         self.rotation = [0.0, 0.0]  # [pitch, yaw]
+        self.scale = 1.0  # 缩放比例
         self.last_mouse = [0, 0]
         self.is_dragging = False
 
@@ -115,6 +116,16 @@ class NPRInteractiveApp:
         ttk.Button(control_frame, text="Load Background", command=self._load_background).pack(fill=tk.X, pady=2)
         ttk.Button(control_frame, text="Clear Color/BG", command=self._clear_extras).pack(fill=tk.X, pady=2)
 
+        # 缩放控制
+        ttk.Separator(control_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+        ttk.Label(control_frame, text="Zoom Control:").pack(anchor=tk.W)
+        zoom_frame = ttk.Frame(control_frame)
+        zoom_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(zoom_frame, text="-", width=3, command=self._zoom_out).pack(side=tk.LEFT, padx=2)
+        self.lbl_zoom = ttk.Label(zoom_frame, text="100%")
+        self.lbl_zoom.pack(side=tk.LEFT, expand=True)
+        ttk.Button(zoom_frame, text="+", width=3, command=self._zoom_in).pack(side=tk.LEFT, padx=2)
+        
         # 保存按钮
         ttk.Button(control_frame, text="Save Screenshot", command=self._save_image).pack(side=tk.BOTTOM, fill=tk.X)
         ttk.Button(control_frame, text="Reset View", command=self._reset_view).pack(side=tk.BOTTOM, fill=tk.X, pady=5)
@@ -130,6 +141,10 @@ class NPRInteractiveApp:
         self.canvas.bind("<Button-1>", self._on_mouse_down)
         self.canvas.bind("<B1-Motion>", self._on_mouse_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_mouse_up)
+        # 绑定滚轮缩放
+        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)  # Windows
+        self.canvas.bind("<Button-4>", self._on_mouse_wheel)  # Linux 向上滚
+        self.canvas.bind("<Button-5>", self._on_mouse_wheel)  # Linux 向下滚
 
         # 提示文字
         self.canvas.create_text(256, 256, text="Drag to Rotate\n(Load a model first)",
@@ -183,6 +198,8 @@ class NPRInteractiveApp:
     def _reset_view(self):
         """重置视角"""
         self.rotation = [0.0, 0.0]
+        self.scale = 1.0
+        self._update_zoom_label()
         self._update_display_model()
         self._trigger_full_render()
 
@@ -222,6 +239,42 @@ class NPRInteractiveApp:
         self.background_image = None
         messagebox.showinfo("已清除", "色彩参考和背景已清除")
         self._trigger_full_render()
+
+    # --- 缩放控制方法 ---
+    def _zoom_in(self):
+        """放大模型"""
+        self.scale = min(self.scale * 1.2, 5.0)  # 最大5倍
+        self._update_zoom_label()
+        self._update_display_model()
+        self._trigger_full_render()
+    
+    def _zoom_out(self):
+        """缩小模型"""
+        self.scale = max(self.scale / 1.2, 0.2)  # 最小0.2倍
+        self._update_zoom_label()
+        self._update_display_model()
+        self._trigger_full_render()
+    
+    def _on_mouse_wheel(self, event):
+        """鼠标滚轮缩放"""
+        if not self.current_model_data:
+            return
+        
+        # Windows 和 macOS
+        if event.num == 4 or event.delta > 0:
+            # 向上滚动 - 放大
+            self.scale = min(self.scale * 1.1, 5.0)
+        elif event.num == 5 or event.delta < 0:
+            # 向下滚动 - 缩小
+            self.scale = max(self.scale / 1.1, 0.2)
+        
+        self._update_zoom_label()
+        self._update_display_model()
+        self._perform_render(preview=True)
+    
+    def _update_zoom_label(self):
+        """更新缩放标签显示"""
+        self.lbl_zoom.config(text=f"{int(self.scale * 100)}%")
 
     # --- 鼠标交互逻辑 ---
     def _on_mouse_down(self, event):
@@ -274,7 +327,7 @@ class NPRInteractiveApp:
         return np.dot(vertices, r.T)
 
     def _update_display_model(self):
-        """根据当前旋转角度更新用于渲染的模型数据"""
+        """根据当前旋转角度和缩放更新用于渲染的模型数据"""
         if self.current_model_data is None:
             return
 
@@ -288,6 +341,12 @@ class NPRInteractiveApp:
             self.rotation[0],
             self.rotation[1]
         )
+        
+        # 应用缩放
+        rotated_verts = rotated_verts * self.scale
+        
+        if self.background_image is not None:
+            rotated_verts[:, 0] *= -1
         self.display_model_data['vertices'] = rotated_verts
 
     # --- 渲染逻辑 ---

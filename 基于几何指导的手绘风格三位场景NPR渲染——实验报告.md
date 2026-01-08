@@ -1,6 +1,6 @@
 # 基于几何指导的手绘风格三维场景NPR渲染——实验报告
 
-本实验设计并实现了一套基于几何缓冲区（G-Buffer）的非真实感渲染（NPR）系统。不同于传统的二维图像滤镜，本系统在光栅化阶段提取三维场景的深度图（Depth Map）与法线图（Normal Map），以此作为几何指导信息，驱动素描、水彩、卡通及油画四种风格的生成。
+本实验设计并实现了一套基于几何缓冲区（G-Buffer）的非真实感渲染（NPR）系统。不同于传统的二维图像滤镜，本系统在光栅化阶段提取三维场景的深度图（Depth Map）与法线图（Normal Map），以此作为几何指导信息，驱动素描、水彩、卡通及油画四种风格的生成。此外，系统引入了**Reinhard色彩迁移算法**与**基于深度的背景合成技术**，实现了从单一模型渲染到完整艺术场景构建的流程闭环。
 
 ## NRP
 
@@ -8,7 +8,7 @@
 
 ## 系统架构和方法
 
-本系统采用延迟着色（Deferred Shading）的思想，将渲染流程分为几何阶段和风格化阶段。
+本系统采用延迟着色（Deferred Shading）的思想，将渲染流程分为几何阶段、风格化阶段风格化迁移阶段。
 
 1. 几何缓冲区的生成
 
@@ -160,7 +160,85 @@
 
         <img src="D:\MyProject\pythonProject\Gra_code_test\demo_output\armadillo_oil.png" alt="armadillo_oil" style="zoom:50%;" />
 
-      
+4. 基于统计匹配的色彩迁移
 
+   为了赋予渲染结果特定的艺术氛围（如模拟梵高的星空色调），本实验实现了基于 **Reinhard** 统计匹配的全局色彩迁移算法。该算法不需要复杂的神经网络训练，而是利用色彩空间的统计特征进行快速映射。
+
+   - **色彩空间转换:** 将源图像（渲染结果）和参考图像（艺术画作）从 RGB 空间转换到 **LAB 色彩空间**。LAB 空间将亮度（L）与色度信息（A, B）分离，且各通道之间的相关性极低，适合独立处理。
+
+   - **统计特征映射:** 分别计算源图像 $S$ 和参考图像 $R$ 在各通道上的均值（$\mu$）和标准差（$\sigma$）。通过线性变换，强行将源图像的色彩分布拉伸至与参考图像一致：$$C_{out} = \frac{C_{in} - \mu_S}{\sigma_S} \cdot \sigma_R + \mu_R$$
+
+     <img src="C:\Users\17391\AppData\Roaming\Typora\typora-user-images\image-20260102165615510.png" alt="image-20260102165543645" style="zoom: 50%;" /><img src="D:\腾讯电脑管家截图文件\局部截取_20260102_165539.png" alt="局部截取_20260102_165539" style="zoom: 50%;" />
+
+```python
+def reinhard_color_transfer(source, reference):
+    """
+    Reinhard色彩迁移算法核心实现
+    Args:
+        source: 原始NPR渲染结果 (RGB)
+        reference: 目标艺术风格参考图 (RGB)
+    """
+    # 1. 转换到 LAB 空间 (解耦亮度和色彩)
+    source_lab = cv2.cvtColor(source, cv2.COLOR_RGB2LAB).astype(np.float32)
+    reference_lab = cv2.cvtColor(reference, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+    # 2. 计算统计量 (均值和标准差)
+    mean_src = source_lab.mean(axis=(0, 1))
+    std_src = source_lab.std(axis=(0, 1))
+    mean_ref = reference_lab.mean(axis=(0, 1))
+    std_ref = reference_lab.std(axis=(0, 1))
+
+    # 3. 应用线性变换 (色彩分布对齐)
+    # 减去源均值 -> 缩放标准差比率 -> 加上参考均值
+    result_lab = (source_lab - mean_src) * (std_ref / std_src) + mean_ref
+
+    # 4. 裁剪并转回 RGB
+    result_lab = np.clip(result_lab, 0, 255).astype(np.uint8)
+    result = cv2.cvtColor(result_lab, cv2.COLOR_LAB2RGB)
+
+    return result
+```
+
+5. 基于深度遮盖的背景合成
+
+   为了将孤立的3D模型融入完整的图像背景中，本系统利用光栅化阶段生成的深度图作为完美的Alpha 通道进行图像合成。
+
+   - **精确遮罩生成:** 不同于基于色度键（绿幕）的抠图技术，本系统直接拥有几何真值。通过深度阈值检测，可以生成像素级精确的前景遮罩（Mask）。
+   - **无伪影合成:** 由于遮罩直接源自几何投影，能够彻底避免传统图像处理中常见的边缘溢色（Color Spill）问题。
+
+   算法逻辑：
+
+   1. 检测深度图中的非零区域作为前景区域，生成二值化 Alpha 通道 $\alpha \in \{0, 1\}$。
+
+   2. 利用线性插值公式进行混合：$$I_{final} = I_{foreground} \cdot \alpha + I_{background} \cdot (1 - \alpha)$$
+
+      <img src="C:\Users\17391\AppData\Roaming\Typora\typora-user-images\image-20260102171121841.png" alt="image-20260102171121841" style="zoom:50%;" />
+
+   ```python
+   def composite_with_background(foreground, depth_map, background):
+       """
+       基于几何深度的背景合成
+       """
+       h, w = depth_map.shape
+       # 调整背景尺寸以匹配前景
+       bg_resized = cv2.resize(background, (w, h))
    
+       # 1. 生成 Alpha 遮罩
+       # 利用光栅化产生的深度图，depth > 0.001 即为确定的模型区域
+       # 这种方式比基于颜色的抠图更精确，无边缘杂色
+       alpha = (depth_map > 0.001).astype(np.float32)
+   
+       # 扩展维度以匹配 RGB 通道 (H, W, 1)
+       alpha = np.expand_dims(alpha, axis=2)
+   
+       # 2. Alpha 混合
+       # 前景 * Alpha + 背景 * (1 - Alpha)
+       result = foreground * alpha + bg_resized * (1 - alpha)
+   
+       return result.astype(np.uint8)
+   ```
+
+## 实验总结
+
+本系统成功构建了一个完整的 NPR 渲染管线。通过结合底层的**几何光栅化**（生成深度/法线）与顶层的**图像处理算法**（Reinhard 色彩迁移、风格化滤镜），从而实现了从风格迁移的手绘风格三维场景NPR渲染。实验结果表明，几何指导信息对于保持物体结构、正确施加阴影以及精确的背景合成至关重要。
 
